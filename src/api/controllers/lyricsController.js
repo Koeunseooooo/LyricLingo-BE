@@ -9,59 +9,70 @@ const getLyrics = async (req, res) => {
     return res.status(400).json({ error: "song parameter is required" });
   }
 
-  // 1. Supabase 캐시 확인
   try {
-    const { data: existingData } = await supabase
+    // 1. Supabase 캐시 확인 (learning_score 있는지 기준)
+    const { data: existingData, error: fetchError } = await supabase
       .from("lyrics")
-      .select("*")
-      .eq("song_title", songTitle)
-      .maybeSingle();
+      .select("id, text, translated, learning_score")
+      .eq("song_id", songTitle);
 
-    if (existingData) {
-      return res.json(existingData.results); // Return the cached results
+    if (fetchError) {
+      console.error("Supabase fetch error:", fetchError.message);
     }
-  } catch (dbError) {
-    console.error("Error checking cache in Supabase:", dbError);
-    // Continue to fetch from API, but log the error
-  }
 
-  try {
-    // 2. 외부 음악 API 호출 (가사 가져오기) -> todo
-    // 2. 가사 데이터 미리 저장 -> 분석 부분만 실제 진행
-    const { data } = await axios.get(
-      "https://api.musixmatch.com/ws/1.1/matcher.lyrics.get",
-      {
-        params: {
-          q_track: songTitle,
-          apikey: process.env.MUSIXMATCH_API_KEY,
-        },
-      }
+    // 2. 캐싱된 분석 결과가 있고 learning_score도 존재할 경우 바로 반환
+    if (existingData && existingData.some((row) => row.learning_score)) {
+      console.log("Cache hit - returning existing AI results");
+      return res.json(existingData);
+    }
+
+    console.log("Cache miss - fetching from external API...");
+
+    // 2. 외부 음악 API 호출 (가사 가져오기) :todo
+    // 2. lyrics 테이블에서 가사 가져오기
+    const { data: lyricsData, error: lyricsError } = await supabase
+      .from("lyrics")
+      .select("id, text")
+      .eq("song_id", songTitle);
+
+    if (lyricsError) {
+      console.error("Error fetching lyrics from Supabase:", lyricsError);
+      return res.status(500).json({ error: "Failed to fetch lyrics from DB" });
+    }
+
+    if (!lyricsData || lyricsData.length === 0) {
+      return res.status(404).json({ error: "Lyrics not found in DB" });
+    }
+
+    res.json(lyricsData);
+
+    // 3. AI 분석 호출
+    const { selectedSentences, learningScore } = await analyzeLyrics(
+      lyricsData
     );
 
-    const lyricsBody = data.message.body.lyrics.lyrics_body;
-    if (!lyricsBody) {
-      return res.status(404).json({ error: "Lyrics not found" });
-    }
-    // Musixmatch adds a disclaimer at the end, let's remove it.
-    const fullLyrics = lyricsBody.split("...")[0];
+    // // 4.DB에 캐싱 (AI 분석 결과와 점수 저장)
+    // const { error: insertError } = await supabase
+    //   .from("lyrics_analysis")
+    //   .upsert({
+    //     song_title: songTitle,
+    //     results: selectedSentences,
+    //     learning_score: learningScore,
+    //     updated_at: new Date().toISOString(),
+    //   });
 
-    // 3️⃣ AI 분석 호출
-    const selectedSentences = await analyzeLyrics(fullLyrics);
+    // if (insertError) {
+    //   console.error("Supabase insert error:", insertError.message);
+    // }
 
-    // 4️⃣ DB에 캐싱
-    await supabase.from("lyrics_analysis").insert({
-      song_title: songTitle,
-      results: selectedSentences,
-    });
-
-    // 5️⃣ 결과 반환
-    res.json(selectedSentences);
+    // // 5️⃣ 결과 반환
+    // res.json(selectedSentences);
   } catch (error) {
-    console.error("Error fetching lyrics or analyzing:", error);
+    console.error("Error in getLyrics:", error);
     if (error.response) {
       console.error("Axios response error:", error.response.data);
     }
-    res.status(500).json({ error: "Failed to fetch lyrics or analyze" });
+    res.status(500).json({ error: "Failed to fetch or analyze lyrics" });
   }
 };
 
